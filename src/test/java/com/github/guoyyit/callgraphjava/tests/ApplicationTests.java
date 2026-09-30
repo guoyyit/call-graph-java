@@ -7,7 +7,10 @@ import org.springframework.boot.test.context.SpringBootTest;
  * @author Vincent
  * @version 1.0
  */
-@SpringBootTest
+@SpringBootTest(properties = {
+        "callgraph.repo=target/test-smoke-repo",
+        "callgraph.data=target/test-callgraph-data-smoke"
+})
 public class ApplicationTests {
     @Test
     public void contentLoad() {
