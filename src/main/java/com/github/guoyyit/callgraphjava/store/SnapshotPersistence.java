@@ -69,4 +69,18 @@ public class SnapshotPersistence {
         }
     }
 
+    /**
+     * Removes the temporary file of an interrupted snapshot write. A leftover
+     * {@code .tmp} file is never a valid snapshot and must not survive a
+     * cancelled or crashed change.
+     */
+    public void deletePending(Path target) {
+        Path pending = target.resolveSibling(target.getFileName() + PENDING_SUFFIX);
+        try {
+            Files.deleteIfExists(pending);
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to delete pending snapshot " + pending, e);
+        }
+    }
+
 }

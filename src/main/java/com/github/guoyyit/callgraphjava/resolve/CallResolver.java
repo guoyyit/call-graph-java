@@ -45,10 +45,20 @@ public class CallResolver {
 
     private List<Edge> resolveConstructor(CallSite site, String receiverType) {
         MethodId target = findDeclaredMethod(receiverType, "<init>", site.arity());
-        if (target == null) {
-            target = new MethodId(receiverType, "<init>", defaultParams(site.arity()));
+        if (target != null) {
+            return List.of(new Edge(site.caller(), target, CallKind.CONSTRUCTOR));
         }
-        return List.of(new Edge(site.caller(), target, CallKind.CONSTRUCTOR));
+        if (hierarchy.typeInfo(receiverType) == null) {
+            // The constructed type is not declared in this repository (for
+            // example a JDK type such as java.util.ArrayList). Calls on
+            // external types never produce call edges.
+            return List.of();
+        }
+        // In-repository type without an explicit constructor: keep the edge to
+        // its implicit default constructor.
+        return List.of(new Edge(site.caller(),
+                new MethodId(receiverType, "<init>", defaultParams(site.arity())),
+                CallKind.CONSTRUCTOR));
     }
 
     private List<Edge> resolveSuper(CallSite site, String ownerType) {
