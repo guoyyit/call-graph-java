@@ -36,22 +36,84 @@ public class JournalStore {
     }
 
     public void append(long revision, List<String> changedFiles) {
+        begin(revision, changedFiles);
+        commit(revision);
+    }
+
+    public void begin(long revision, List<String> changedFiles) {
         Map<String, Object> begin = new LinkedHashMap<>();
         begin.put("op", BEGIN);
         begin.put("revision", revision);
         begin.put("files", changedFiles);
+        appendEntries(List.of(begin));
+    }
+
+    public void commit(long revision) {
         Map<String, Object> commit = new LinkedHashMap<>();
         commit.put("op", COMMIT);
         commit.put("revision", revision);
+        appendEntries(List.of(commit));
+    }
+
+    private void appendEntries(List<Map<String, Object>> entries) {
         try (FileChannel channel = FileChannel.open(journal, StandardOpenOption.WRITE,
                 StandardOpenOption.APPEND)) {
-            channel.write(StandardCharsets.UTF_8.encode(mapper.writeValueAsString(begin) + System.lineSeparator()));
-            channel.write(StandardCharsets.UTF_8.encode(mapper.writeValueAsString(commit)
-                    + System.lineSeparator()));
+            for (Map<String, Object> entry : entries) {
+                channel.write(StandardCharsets.UTF_8.encode(mapper.writeValueAsString(entry)
+                        + System.lineSeparator()));
+            }
             channel.force(true);
         } catch (IOException e) {
             throw new UncheckedIOException("cannot append journal entry", e);
         }
+    }
+
+    public void discard(long revision) {
+        rewriteKeeping(entry -> ((Number) entry.get("revision")).longValue() != revision);
+    }
+
+    public void discardIncomplete() {
+        Set<Long> committed = new java.util.HashSet<>();
+        for (Map<?, ?> entry : readEntries()) {
+            if (COMMIT.equals(entry.get("op"))) {
+                committed.add(((Number) entry.get("revision")).longValue());
+            }
+        }
+        rewriteKeeping(entry -> {
+            long revision = ((Number) entry.get("revision")).longValue();
+            return committed.contains(revision);
+        });
+    }
+
+    private void rewriteKeeping(java.util.function.Predicate<Map<?, ?>> keep) {
+        try {
+            List<String> kept = new ArrayList<>();
+            for (Map<?, ?> entry : readEntries()) {
+                if (keep.test(entry)) {
+                    kept.add(mapper.writeValueAsString(entry));
+                }
+            }
+            Files.writeString(journal, String.join(System.lineSeparator(), kept)
+                    + (kept.isEmpty() ? "" : System.lineSeparator()), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot rewrite journal", e);
+        }
+    }
+
+    private List<Map<?, ?>> readEntries() {
+        List<Map<?, ?>> entries = new ArrayList<>();
+        try (BufferedReader reader = Files.newBufferedReader(journal, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                entries.add(mapper.readValue(line, Map.class));
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot read journal", e);
+        }
+        return entries;
     }
 
     public List<PendingChange> pendingChanges(long lastSnapshotRevision) {

@@ -32,6 +32,7 @@ public class CallGraphService {
     private final SnapshotPersistence persistence;
     private final JournalStore journal;
     private final ReentrantLock updateLock = new ReentrantLock();
+    private final Object commitMonitor = new Object();
 
     public CallGraphService(Path repositoryRoot, Path stateDirectory, GraphStore store,
                             SnapshotPersistence persistence, JournalStore journal) {
@@ -58,13 +59,18 @@ public class CallGraphService {
     public void build(Path root, ProgressToken token) {
         updateLock.lock();
         try {
-            long revision = store.current().revision() + 1;
+            checkCancelled(token);
+            long revision = nextRevision();
             List<String> allFiles = scanner.scan(root).stream().map(path -> relativize(root, path)).toList();
-            journal.append(revision, allFiles);
-            GraphSnapshot built = builder.buildFull(root, token);
-            GraphSnapshot committed = new GraphSnapshot(revision, built.rawFiles(), built.files(),
-                    built.types(), built.methods(), built.resolvedReceiver(), built.edges());
-            persistAndCommit(committed);
+            journal.begin(revision, allFiles);
+            try {
+                GraphSnapshot built = builder.buildFull(root, token);
+                commitSnapshot(new GraphSnapshot(revision, built.rawFiles(), built.files(),
+                        built.types(), built.methods(), built.resolvedReceiver(), built.edges()), token);
+            } catch (RuntimeException e) {
+                discardUncommitted(revision);
+                throw e;
+            }
         } finally {
             updateLock.unlock();
         }
@@ -73,18 +79,24 @@ public class CallGraphService {
     public GraphSnapshot update(ProgressToken token) {
         updateLock.lock();
         try {
+            checkCancelled(token);
             GraphSnapshot base = store.current();
             List<String> changed = detectChanges(base);
             if (changed.isEmpty()) {
                 return base;
             }
-            long revision = base.revision() + 1;
-            journal.append(revision, changed);
-            GraphSnapshot updated = updater.update(base, repositoryRoot, changed, token);
-            GraphSnapshot committed = new GraphSnapshot(revision, updated.rawFiles(), updated.files(),
-                    updated.types(), updated.methods(), updated.resolvedReceiver(), updated.edges());
-            persistAndCommit(committed);
-            return committed;
+            long revision = nextRevision();
+            journal.begin(revision, changed);
+            try {
+                GraphSnapshot updated = updater.update(base, repositoryRoot, changed, token);
+                GraphSnapshot committed = new GraphSnapshot(revision, updated.rawFiles(), updated.files(),
+                        updated.types(), updated.methods(), updated.resolvedReceiver(), updated.edges());
+                commitSnapshot(committed, token);
+                return committed;
+            } catch (RuntimeException e) {
+                discardUncommitted(revision);
+                throw e;
+            }
         } finally {
             updateLock.unlock();
         }
@@ -94,9 +106,10 @@ public class CallGraphService {
         updateLock.lock();
         try {
             Path snapshotPath = stateDirectory.resolve("snapshot.json");
+            persistence.deletePending(snapshotPath);
             GraphSnapshot loaded = persistence.read(snapshotPath);
             if (loaded != null) {
-                store.commit(loaded);
+                store.commitIfNewer(loaded);
             }
             for (JournalStore.PendingChange pending : journal.pendingChanges(store.current().revision())) {
                 GraphSnapshot updated = updater.update(store.current(), repositoryRoot,
@@ -104,8 +117,10 @@ public class CallGraphService {
                 GraphSnapshot committed = new GraphSnapshot(pending.revision(), updated.rawFiles(),
                         updated.files(), updated.types(), updated.methods(),
                         updated.resolvedReceiver(), updated.edges());
-                persistAndCommit(committed);
+                commitSnapshot(committed, ProgressToken.neverCancelled());
             }
+            journal.discardIncomplete();
+            journal.truncateThrough(store.current().revision());
         } finally {
             updateLock.unlock();
         }
@@ -129,10 +144,35 @@ public class CallGraphService {
         return changed;
     }
 
-    private void persistAndCommit(GraphSnapshot committed) {
-        persistence.writeAtomically(stateDirectory.resolve("snapshot.json"), committed);
-        store.commit(committed);
-        journal.truncateThrough(committed.revision());
+    private long nextRevision() {
+        return Math.max(store.current().revision(), journal.latestCommittedRevision()) + 1;
+    }
+
+    private void commitSnapshot(GraphSnapshot committed, ProgressToken token) {
+        synchronized (commitMonitor) {
+            beforeCommit(committed, token);
+            checkCancelled(token);
+            Path target = stateDirectory.resolve("snapshot.json");
+            Path pending = persistence.writePending(target, committed);
+            journal.commit(committed.revision());
+            persistence.publish(pending, target);
+            store.commit(committed);
+            journal.truncateThrough(committed.revision());
+        }
+    }
+
+    protected void beforeCommit(GraphSnapshot pending, ProgressToken token) {
+    }
+
+    private void discardUncommitted(long revision) {
+        journal.discard(revision);
+        persistence.deletePending(stateDirectory.resolve("snapshot.json"));
+    }
+
+    private void checkCancelled(ProgressToken token) {
+        if (token != null && token.isCancelled()) {
+            throw new java.util.concurrent.CancellationException("call graph change cancelled");
+        }
     }
 
     private String relativize(Path root, Path source) {

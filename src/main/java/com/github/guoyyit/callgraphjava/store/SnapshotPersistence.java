@@ -26,6 +26,11 @@ public class SnapshotPersistence {
     }
 
     public void writeAtomically(Path target, GraphSnapshot snapshot) {
+        Path pending = writePending(target, snapshot);
+        publish(pending, target);
+    }
+
+    public Path writePending(Path target, GraphSnapshot snapshot) {
         Path parent = target.toAbsolutePath().getParent();
         try {
             if (parent != null) {
@@ -51,9 +56,26 @@ public class SnapshotPersistence {
                 mapper.writerWithDefaultPrettyPrinter().writeValue(output, snapshot);
                 channel.force(true);
             }
+            return pending;
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to persist snapshot to " + target, e);
+        }
+    }
+
+    public void publish(Path pending, Path target) {
+        try {
             Files.move(pending, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             throw new UncheckedIOException("failed to persist snapshot to " + target, e);
+        }
+    }
+
+    public void deletePending(Path target) {
+        Path pending = target.resolveSibling(target.getFileName() + PENDING_SUFFIX);
+        try {
+            Files.deleteIfExists(pending);
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to delete pending snapshot " + pending, e);
         }
     }
 

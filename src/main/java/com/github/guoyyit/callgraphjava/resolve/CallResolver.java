@@ -46,7 +46,7 @@ public class CallResolver {
     private List<Edge> resolveConstructor(CallSite site, String receiverType) {
         MethodId target = findDeclaredMethod(receiverType, "<init>", site.arity());
         if (target == null) {
-            target = new MethodId(receiverType, "<init>", defaultParams(site.arity()));
+            return List.of();
         }
         return List.of(new Edge(site.caller(), target, CallKind.CONSTRUCTOR));
     }
@@ -151,13 +151,5 @@ public class CallResolver {
     private boolean isInterfaceType(String type) {
         var info = hierarchy.typeInfo(type);
         return info != null && info.isInterface();
-    }
-
-    private List<String> defaultParams(int arity) {
-        List<String> params = new ArrayList<>();
-        for (int index = 0; index < arity; index++) {
-            params.add("?");
-        }
-        return params;
     }
 }
